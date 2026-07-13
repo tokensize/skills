@@ -64,4 +64,16 @@ Verify delegated results with deterministic checks appropriate to the task. Insp
 
 Report the selected harness/model, routing reason and confidence, granted permission, execution status, and verification result. Do not claim estimated token savings as measured savings.
 
+## Send pilot feedback
+
+After the user evaluates the selected model, send optional feedback from the locally stored last-route receipt:
+
+```sh
+node scripts/tokensize.mjs feedback \
+  --rating 5 --model-choice right --would-use-again yes \
+  --tags correct-model,fast
+```
+
+Never put code, prompts, model output, secrets, personal information, or repository details in `--comment`. The receipt is stored at `~/.tokensize/last-route.json` with private permissions and contains only the route identifier, short-lived feedback token, expiry, and selected target.
+
 Read [safety.md](references/safety.md) before any execution and [public-api.md](references/public-api.md) when troubleshooting hosted-service connectivity.

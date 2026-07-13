@@ -37,6 +37,10 @@ function discoveryCacheFile() {
   return path.join(tokensizeHome(), "discovery.json");
 }
 
+function lastRouteFile() {
+  return path.join(tokensizeHome(), "last-route.json");
+}
+
 function discoveryCacheTtlMs() {
   const configured = Number(process.env.TOKENSIZE_DISCOVERY_CACHE_TTL_MS || DEFAULT_DISCOVERY_CACHE_TTL_MS);
   return Number.isFinite(configured) && configured >= 0 ? configured : DEFAULT_DISCOVERY_CACHE_TTL_MS;
@@ -366,6 +370,32 @@ async function installationId() {
   return id;
 }
 
+async function saveLastRoute(route) {
+  const home = tokensizeHome();
+  const file = lastRouteFile();
+  const temporary = `${file}.${process.pid}.tmp`;
+  await mkdir(home, { recursive: true, mode: 0o700 });
+  await writeFile(temporary, `${JSON.stringify({
+    routeId: route.routeId,
+    feedbackToken: route.feedbackToken,
+    expiresAt: route.expiresAt,
+    targetId: route.plan?.targetId ?? null,
+  }, null, 2)}\n`, { mode: 0o600 });
+  await rename(temporary, file);
+}
+
+async function lastRoute() {
+  try {
+    const value = JSON.parse(await readFile(lastRouteFile(), "utf8"));
+    if (typeof value.routeId !== "string" || typeof value.feedbackToken !== "string") throw new Error();
+    if (typeof value.expiresAt === "string" && Date.parse(value.expiresAt) < Date.now()) fail("the last route has expired; delegate another task before sending feedback");
+    return value;
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith("the last route")) throw error;
+    fail("no local route receipt found; delegate a task before sending feedback");
+  }
+}
+
 function features(task, role, permission) {
   const text = task.toLowerCase();
   const tokens = Math.ceil(task.length / 4);
@@ -539,11 +569,36 @@ async function main() {
     emit({ service: { url: API_URL, authenticated: Boolean(process.env.TOKENSIZE_API_KEY), catalog }, privacy: "credentials and prompts remain local unless prompt sharing is explicit", cache: discovered.cache, harnesses: publicDiscovery(discovered.harnesses) });
     return;
   }
+  if (command === "feedback") {
+    const rating = Number(flag("--rating"));
+    const modelChoice = flag("--model-choice");
+    const wouldUseAgain = flag("--would-use-again");
+    if (!Number.isInteger(rating) || rating < 1 || rating > 5) fail("--rating must be an integer from 1 to 5");
+    if (!["right", "acceptable", "wrong"].includes(modelChoice)) fail("--model-choice must be right, acceptable, or wrong");
+    if (!["yes", "no"].includes(wouldUseAgain)) fail("--would-use-again must be yes or no");
+    const receipt = await lastRoute();
+    const reasonTags = (flag("--tags") || "").split(",").map((value) => value.trim()).filter(Boolean);
+    const response = await api("/v1/pilot-feedback", {
+      method: "POST",
+      body: JSON.stringify({
+        routeId: receipt.routeId,
+        feedbackToken: receipt.feedbackToken,
+        rating,
+        modelChoice,
+        wouldUseAgain: wouldUseAgain === "yes",
+        reasonTags,
+        ...(flag("--comment") ? { comment: flag("--comment") } : {}),
+      }),
+    });
+    emit({ ...response, routeId: receipt.routeId, privacy: "feedback excludes prompts, repository contents, model output, and credentials" });
+    return;
+  }
   if (command === "route" || command === "delegate") {
     const task = flag("--task");
     if (!task) fail("--task is required");
     const prepared = await prepare(task);
     const route = await api("/v1/agent-routes", { method: "POST", body: JSON.stringify(prepared.body) });
+    await saveLastRoute(route);
     if (command === "route" || !has("--execute")) {
       emit({ dryRun: true, route: publicRoute(route), cache: prepared.cache, harnesses: publicDiscovery(prepared.discovery) });
       return;
@@ -553,7 +608,7 @@ async function main() {
     if (execution.code !== 0) process.exitCode = 1;
     return;
   }
-  process.stdout.write(`TokenSize Delegate\n\n  doctor [--refresh] [--verbose] [--json]\n  route --task TEXT [--role inspect|plan|implement|review|test] [--permission inspect|edit|test] [--refresh] [--verbose]\n  delegate --task TEXT [same options] [--execute]\n`);
+  process.stdout.write(`TokenSize Delegate\n\n  doctor [--refresh] [--verbose] [--json]\n  route --task TEXT [--role inspect|plan|implement|review|test] [--permission inspect|edit|test] [--refresh] [--verbose]\n  delegate --task TEXT [same options] [--execute]\n  feedback --rating 1..5 --model-choice right|acceptable|wrong --would-use-again yes|no [--tags TAGS] [--comment TEXT]\n`);
 }
 
 main().catch((error) => fail(error instanceof Error ? error.message : String(error)));
