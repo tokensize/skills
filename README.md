@@ -18,6 +18,8 @@ $delegate inspect this repository for authentication risks
 
 The [`delegate`](skills/delegate/SKILL.md) skill discovers local Codex, Claude Code, Cursor Agent, and GitHub Copilot CLI installations; requests a privacy-safe route from `api.tokensize.dev`; and optionally executes the approved route locally.
 
+Discovery is cached locally for six hours at `~/.tokensize/discovery.json`. Use `--refresh` to rescan immediately; missing or unavailable cached targets cause an automatic refresh. Normal output is summarized to conserve agent context, with `--verbose` available for the complete model catalog. The cache never stores credentials or prompts.
+
 The skill requires Node.js 20+ and a TokenSize API key supplied through `TOKENSIZE_API_KEY`. It never stores the API key.
 
 ## Public-code boundary

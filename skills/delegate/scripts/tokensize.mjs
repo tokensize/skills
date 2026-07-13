@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 import { randomUUID } from "node:crypto";
-import { access, mkdir, readFile, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 
 const API_URL = (process.env.TOKENSIZE_API_URL || "https://api.tokensize.dev").replace(/\/$/, "");
+const DISCOVERY_CACHE_VERSION = 1;
+const DEFAULT_DISCOVERY_CACHE_TTL_MS = 6 * 60 * 60 * 1_000;
 const args = process.argv.slice(2);
 const command = args[0] || "help";
 
@@ -25,6 +27,27 @@ function fail(message) {
 
 function emit(value) {
   process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
+}
+
+function tokensizeHome() {
+  return process.env.TOKENSIZE_HOME || path.join(os.homedir(), ".tokensize");
+}
+
+function discoveryCacheFile() {
+  return path.join(tokensizeHome(), "discovery.json");
+}
+
+function discoveryCacheTtlMs() {
+  const configured = Number(process.env.TOKENSIZE_DISCOVERY_CACHE_TTL_MS || DEFAULT_DISCOVERY_CACHE_TTL_MS);
+  return Number.isFinite(configured) && configured >= 0 ? configured : DEFAULT_DISCOVERY_CACHE_TTL_MS;
+}
+
+function discoveryFingerprint() {
+  return JSON.stringify({
+    path: process.env.PATH || "",
+    claudeModels: process.env.TOKENSIZE_CLAUDE_MODELS || "",
+    copilotModels: process.env.TOKENSIZE_COPILOT_MODELS || "",
+  });
 }
 
 async function run(executable, argv, options = {}) {
@@ -228,12 +251,110 @@ async function discoverCopilot() {
   };
 }
 
-async function discover() {
+async function discoverFresh() {
   return await Promise.all([discoverCodex(), discoverClaude(), discoverCursor(), discoverCopilot()]);
 }
 
+function applyCurrentApproval(harnesses) {
+  return harnesses.map((item) => ({
+    ...item,
+    models: item.models.map((model) => {
+      const apiKeyMode = (model.harness === "codex" && Boolean(process.env.OPENAI_API_KEY))
+        || (model.harness === "claude" && Boolean(process.env.ANTHROPIC_API_KEY));
+      return {
+        ...model,
+        authMode: apiKeyMode ? "api-key" : "subscription",
+        productUseApproved: apiKeyMode || approved(model.harness),
+      };
+    }),
+  }));
+}
+
+async function cachedExecutablesExist(harnesses) {
+  try {
+    await Promise.all(harnesses
+      .filter((item) => item.installed)
+      .map((item) => item.executable ? access(item.executable) : Promise.reject(new Error("missing executable"))));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function readDiscoveryCache() {
+  const file = discoveryCacheFile();
+  try {
+    const cached = JSON.parse(await readFile(file, "utf8"));
+    if (cached.schemaVersion !== DISCOVERY_CACHE_VERSION
+      || cached.fingerprint !== discoveryFingerprint()
+      || !Array.isArray(cached.harnesses)
+      || Date.parse(cached.expiresAt) <= Date.now()
+      || !(await cachedExecutablesExist(cached.harnesses))) return null;
+    return {
+      harnesses: applyCurrentApproval(cached.harnesses),
+      cache: {
+        hit: true,
+        path: file,
+        createdAt: cached.createdAt,
+        expiresAt: cached.expiresAt,
+        ageMs: Math.max(0, Date.now() - Date.parse(cached.createdAt)),
+      },
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function writeDiscoveryCache(harnesses, reason) {
+  const home = tokensizeHome();
+  const file = discoveryCacheFile();
+  const temporary = `${file}.${process.pid}.tmp`;
+  const createdAt = new Date();
+  const value = {
+    schemaVersion: DISCOVERY_CACHE_VERSION,
+    createdAt: createdAt.toISOString(),
+    expiresAt: new Date(createdAt.getTime() + discoveryCacheTtlMs()).toISOString(),
+    fingerprint: discoveryFingerprint(),
+    harnesses,
+  };
+  await mkdir(home, { recursive: true, mode: 0o700 });
+  await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+  await rename(temporary, file);
+  return {
+    hit: false,
+    refreshed: true,
+    reason,
+    path: file,
+    createdAt: value.createdAt,
+    expiresAt: value.expiresAt,
+    ageMs: 0,
+  };
+}
+
+async function discover(options = {}) {
+  if (!options.forceRefresh && !has("--refresh")) {
+    const cached = await readDiscoveryCache();
+    if (cached) return cached;
+  }
+  const harnesses = await discoverFresh();
+  const reason = options.reason || (has("--refresh") ? "manual" : "miss-or-stale");
+  let cache;
+  try {
+    cache = await writeDiscoveryCache(harnesses, reason);
+  } catch (error) {
+    cache = {
+      hit: false,
+      refreshed: true,
+      persisted: false,
+      reason,
+      warning: `could not persist discovery cache: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+  return { harnesses, cache };
+}
+
 async function installationId() {
-  const home = process.env.TOKENSIZE_HOME || path.join(os.homedir(), ".tokensize");
+  const home = tokensizeHome();
   const file = path.join(home, "config.json");
   try {
     const value = JSON.parse(await readFile(file, "utf8"));
@@ -296,7 +417,8 @@ async function prepare(task) {
   const permission = flag("--permission") || "inspect";
   if (!["inspect", "plan", "implement", "review", "test"].includes(role)) fail("invalid --role");
   if (!["inspect", "edit", "test", "network"].includes(permission)) fail("invalid --permission");
-  const discovery = await discover();
+  const discovered = await discover();
+  const discovery = discovered.harnesses;
   const candidates = discovery.flatMap((item) => item.authenticated ? item.models : []);
   const body = {
     schemaVersion: 1,
@@ -318,18 +440,39 @@ async function prepare(task) {
       wallTimeBudgetMs: Number(flag("--timeout-ms") || 900_000),
     },
   };
-  return { body, discovery };
+  return { body, discovery, cache: discovered.cache };
 }
 
 function publicRoute(route) {
   return { ...route, feedbackToken: "[redacted]" };
 }
 
-async function execute(task, route, discovery) {
+function publicDiscovery(harnesses) {
+  if (has("--verbose")) return harnesses;
+  return harnesses.map((item) => ({
+    harness: item.harness,
+    installed: item.installed,
+    authenticated: item.authenticated,
+    version: item.version,
+    modelCount: item.models.length,
+    warnings: item.warnings,
+  }));
+}
+
+async function execute(task, route, discovery, cache) {
   if (!route.plan?.targetId) fail(`no local target selected (${(route.reasonCodes || []).join(", ")})`);
   if (route.plan.permissionProfile === "network") fail("network delegation is not supported");
   const target = discovery.flatMap((item) => item.models.map((model) => ({ item, model }))).find(({ model }) => model.id === route.plan.targetId);
-  if (!target?.item.executable || !target.item.authenticated) fail("selected target is no longer available");
+  if (!target?.item.executable || !target.item.authenticated) {
+    await discover({ forceRefresh: true, reason: "selected-target-unavailable" });
+    fail("selected target is no longer available; local discovery cache refreshed");
+  }
+  try {
+    await access(target.item.executable);
+  } catch {
+    await discover({ forceRefresh: true, reason: "selected-executable-missing" });
+    fail("selected harness executable no longer exists; local discovery cache refreshed");
+  }
   if (!["codex", "claude", "cursor"].includes(target.model.harness)) fail(`${target.model.harness} is discovery-only in this client`);
   if (target.model.harness === "cursor" && route.plan.permissionProfile !== "inspect") fail("Cursor execution is inspect-only");
 
@@ -338,7 +481,7 @@ async function execute(task, route, discovery) {
   if (route.plan.requiresWorktree) {
     const gitCheck = await run("git", ["rev-parse", "--show-toplevel"], { cwd, timeoutMs: 15_000 });
     if (gitCheck.code !== 0) fail("edit/test delegation requires a Git repository");
-    worktree = path.join(process.env.TOKENSIZE_HOME || path.join(os.homedir(), ".tokensize"), "worktrees", route.routeId);
+    worktree = path.join(tokensizeHome(), "worktrees", route.routeId);
     await mkdir(path.dirname(worktree), { recursive: true, mode: 0o700 });
     const branch = `tokensize/${route.routeId.slice(0, 8)}`;
     const created = await run("git", ["worktree", "add", "-b", branch, worktree, "HEAD"], { cwd, timeoutMs: 30_000 });
@@ -355,6 +498,13 @@ async function execute(task, route, discovery) {
   const started = Date.now();
   const result = await run(target.item.executable, argv, { cwd, input: task, timeoutMs: route.plan.maxWallMs });
   const elapsed = Date.now() - started;
+  const availabilityFailure = result.timedOut || (result.code !== 0
+    && /unknown model|model.{0,24}(not found|not available|unavailable|invalid)|invalid value.{0,80}--model|not logged in|unauthenticated|authentication|command not found|enoent/i.test(`${result.stderr}\n${result.stdout}`));
+  let discoveryRefresh;
+  if (availabilityFailure) {
+    const refreshed = await discover({ forceRefresh: true, reason: result.timedOut ? "execution-timeout" : "execution-availability-failure" });
+    discoveryRefresh = refreshed.cache;
+  }
   try {
     await api("/v1/agent-feedback", {
       method: "POST",
@@ -377,16 +527,16 @@ async function execute(task, route, discovery) {
   } catch (error) {
     result.feedbackWarning = error instanceof Error ? error.message : String(error);
   }
-  return { target: target.model.id, code: result.code, timedOut: result.timedOut, worktree, stdout: result.stdout, stderr: result.stderr, feedbackWarning: result.feedbackWarning };
+  return { target: target.model.id, code: result.code, timedOut: result.timedOut, worktree, stdout: result.stdout, stderr: result.stderr, feedbackWarning: result.feedbackWarning, cacheUsed: cache, discoveryRefresh };
 }
 
 async function main() {
   if (command === "doctor") {
-    const [catalog, harnesses] = await Promise.all([
+    const [catalog, discovered] = await Promise.all([
       process.env.TOKENSIZE_API_KEY ? api("/v1/agent-catalog") : Promise.resolve(null),
       discover(),
     ]);
-    emit({ service: { url: API_URL, authenticated: Boolean(process.env.TOKENSIZE_API_KEY), catalog }, privacy: "credentials and prompts remain local unless prompt sharing is explicit", harnesses });
+    emit({ service: { url: API_URL, authenticated: Boolean(process.env.TOKENSIZE_API_KEY), catalog }, privacy: "credentials and prompts remain local unless prompt sharing is explicit", cache: discovered.cache, harnesses: publicDiscovery(discovered.harnesses) });
     return;
   }
   if (command === "route" || command === "delegate") {
@@ -395,15 +545,15 @@ async function main() {
     const prepared = await prepare(task);
     const route = await api("/v1/agent-routes", { method: "POST", body: JSON.stringify(prepared.body) });
     if (command === "route" || !has("--execute")) {
-      emit({ dryRun: true, route: publicRoute(route), harnesses: prepared.discovery });
+      emit({ dryRun: true, route: publicRoute(route), cache: prepared.cache, harnesses: publicDiscovery(prepared.discovery) });
       return;
     }
-    const execution = await execute(task, route, prepared.discovery);
+    const execution = await execute(task, route, prepared.discovery, prepared.cache);
     emit({ dryRun: false, route: publicRoute(route), execution });
     if (execution.code !== 0) process.exitCode = 1;
     return;
   }
-  process.stdout.write(`TokenSize Delegate\n\n  doctor [--json]\n  route --task TEXT [--role inspect|plan|implement|review|test] [--permission inspect|edit|test]\n  delegate --task TEXT [same options] [--execute]\n`);
+  process.stdout.write(`TokenSize Delegate\n\n  doctor [--refresh] [--verbose] [--json]\n  route --task TEXT [--role inspect|plan|implement|review|test] [--permission inspect|edit|test] [--refresh] [--verbose]\n  delegate --task TEXT [same options] [--execute]\n`);
 }
 
 main().catch((error) => fail(error instanceof Error ? error.message : String(error)));

@@ -18,7 +18,7 @@ Use the bundled client to discover local coding harnesses, obtain an advisory ro
 node scripts/tokensize.mjs doctor --json
 ```
 
-Treat discovery as capability metadata, not proof that a paid model invocation will succeed.
+Discovery is cached for six hours in `~/.tokensize/discovery.json`. Set `TOKENSIZE_DISCOVERY_CACHE_TTL_MS` to change the TTL, or add `--refresh` to force discovery. Normal output is summarized to conserve context; use `--verbose` only when full model metadata is needed. The cache contains harness/model capability metadata only—never credentials or prompts. Missing executables, stale selected targets, and model/authentication availability failures trigger a refresh. Treat discovery as capability metadata, not proof that a paid model invocation will succeed.
 
 ## Route safely
 
