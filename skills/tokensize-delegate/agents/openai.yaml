@@ -1,0 +1,4 @@
+interface:
+  display_name: "TokenSize Delegate"
+  short_description: "Route work to the best local coding agent"
+  default_prompt: "Use $tokensize-delegate to discover my local coding agents and safely delegate this task through TokenSize."

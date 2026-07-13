@@ -1,0 +1,7 @@
+.DS_Store
+.env*
+.dev.vars*
+.tokensize/
+node_modules/
+dist/
+*.log
