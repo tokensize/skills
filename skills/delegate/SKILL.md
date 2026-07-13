@@ -1,9 +1,9 @@
 ---
-name: tokensize-delegate
+name: delegate
 description: Discover locally installed coding-agent CLIs and route bounded software tasks through the hosted TokenSize service while keeping credentials, repository context, prompts, and execution local by default. Use when delegating inspection, planning, implementation, review, or test work to Codex, Claude Code, Cursor Agent, GitHub Copilot CLI, or another configured local harness; comparing available agents; or reducing the primary agent's context usage.
 ---
 
-# TokenSize Delegate
+# Delegate with TokenSize
 
 Use the bundled client to discover local coding harnesses, obtain an advisory route from TokenSize, and execute only within the user's permission boundary.
 

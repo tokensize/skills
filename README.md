@@ -2,13 +2,21 @@
 
 Public Agent Skills for routing work through [TokenSize](https://tokensize.dev) to coding-agent harnesses already installed on your machine.
 
-## Available skill
+## Getting started
 
-- [`tokensize-delegate`](skills/tokensize-delegate/SKILL.md) discovers local Codex, Claude Code, Cursor Agent, and GitHub Copilot CLI installations; requests a privacy-safe route from `api.tokensize.dev`; and optionally executes the approved route locally.
+Install the TokenSize skill:
 
-## Install
+```sh
+npx skills add tokensize/skills
+```
 
-Install from this repository with a compatible Agent Skills installer, or copy `skills/tokensize-delegate` into your agent's skills directory.
+Then invoke it directly in Codex or another compatible agent:
+
+```text
+$delegate inspect this repository for authentication risks
+```
+
+The [`delegate`](skills/delegate/SKILL.md) skill discovers local Codex, Claude Code, Cursor Agent, and GitHub Copilot CLI installations; requests a privacy-safe route from `api.tokensize.dev`; and optionally executes the approved route locally.
 
 The skill requires Node.js 20+ and a TokenSize API key supplied through `TOKENSIZE_API_KEY`. It never stores the API key.
 
