@@ -16,7 +16,7 @@ Then invoke it directly in Codex or another compatible agent:
 $delegate inspect this repository for authentication risks
 ```
 
-The [`delegate`](skills/delegate/SKILL.md) skill discovers local Codex, Claude Code, Cursor Agent, and GitHub Copilot CLI installations; requests a privacy-safe route from `api.tokensize.dev`; and optionally executes the approved route locally.
+The [`delegate`](skills/delegate/SKILL.md) skill discovers local Codex, Claude Code, Cursor Agent, OpenCode, and GitHub Copilot CLI installations; requests a privacy-safe route from `api.tokensize.dev`; and optionally executes the approved route locally. OpenCode execution is inspect-only and uses its plan agent without broad `--auto` approval.
 
 The easiest setup is the browser callback flow:
 

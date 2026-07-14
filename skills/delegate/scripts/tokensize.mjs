@@ -7,7 +7,7 @@ import { execFile, spawn } from "node:child_process";
 import { createServer } from "node:http";
 
 const API_URL = (process.env.TOKENSIZE_API_URL || "https://api.tokensize.dev").replace(/\/$/, "");
-const DISCOVERY_CACHE_VERSION = 1;
+const DISCOVERY_CACHE_VERSION = 2;
 const DEFAULT_DISCOVERY_CACHE_TTL_MS = 6 * 60 * 60 * 1_000;
 const args = process.argv.slice(2);
 const command = args[0] || "help";
@@ -269,8 +269,40 @@ async function discoverCopilot() {
   };
 }
 
+function stripAnsi(value) {
+  return value.replace(/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, "");
+}
+
+function opencodeModelIds(output) {
+  return [...new Set(stripAnsi(output).split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => /^[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._:/-]*$/i.test(line)))];
+}
+
+async function discoverOpenCode() {
+  const executable = await findExecutable(["opencode"]);
+  if (!executable) return { harness: "opencode", installed: false, authenticated: false, models: [], warnings: [] };
+  const [version, auth, catalog] = await Promise.all([
+    run(executable, ["--version"]),
+    run(executable, ["auth", "list"]),
+    run(executable, ["models"], { timeoutMs: 30_000, maxBytes: 2_000_000 }),
+  ]);
+  const authOutput = stripAnsi(`${auth.stdout}\n${auth.stderr}`).trim();
+  const authenticated = auth.code === 0 && authOutput.length > 0 && !/\b(?:no|0)\s+(?:credentials|providers|authentication)\b/i.test(authOutput);
+  const available = opencodeModelIds(catalog.stdout);
+  const frontier = available.filter((id) => /gpt-5\.[4-9]|opus|fable|sonnet|grok|gemini|glm|qwen|coder/i.test(id));
+  const models = (frontier.length ? frontier : available).slice(0, 48).map((id) => candidate("opencode", id, id, {
+    permissions: ["inspect"],
+  }));
+  const warnings = [];
+  if (!authenticated) warnings.push("OpenCode did not report a configured provider credential");
+  if (!models.length) warnings.push("OpenCode model catalog was unavailable; run `opencode models --refresh`");
+  if (!approved("opencode")) warnings.push("Set TOKENSIZE_ALLOW_SUBSCRIPTION_HARNESSES=opencode only when provider and product terms permit delegated use");
+  return { harness: "opencode", installed: true, authenticated, executable, version: version.stdout.trim(), models, warnings };
+}
+
 async function discoverFresh() {
-  return await Promise.all([discoverCodex(), discoverClaude(), discoverCursor(), discoverCopilot()]);
+  return await Promise.all([discoverCodex(), discoverClaude(), discoverCursor(), discoverCopilot(), discoverOpenCode()]);
 }
 
 function applyCurrentApproval(harnesses) {
@@ -463,7 +495,15 @@ async function prepare(task) {
   if (!["inspect", "edit", "test", "network"].includes(permission)) fail("invalid --permission");
   const discovered = await discover();
   const discovery = discovered.harnesses;
-  const candidates = discovery.flatMap((item) => item.authenticated ? item.models : []);
+  const queues = discovery.filter((item) => item.authenticated).map((item) => [...item.models]);
+  const candidates = [];
+  while (candidates.length < 100 && queues.some((queue) => queue.length)) {
+    for (const queue of queues) {
+      const next = queue.shift();
+      if (next) candidates.push(next);
+      if (candidates.length === 100) break;
+    }
+  }
   const body = {
     schemaVersion: 1,
     requestId: randomUUID(),
@@ -517,8 +557,8 @@ async function execute(task, route, discovery, cache) {
     await discover({ forceRefresh: true, reason: "selected-executable-missing" });
     fail("selected harness executable no longer exists; local discovery cache refreshed");
   }
-  if (!["codex", "claude", "cursor"].includes(target.model.harness)) fail(`${target.model.harness} is discovery-only in this client`);
-  if (target.model.harness === "cursor" && route.plan.permissionProfile !== "inspect") fail("Cursor execution is inspect-only");
+  if (!["codex", "claude", "cursor", "opencode"].includes(target.model.harness)) fail(`${target.model.harness} is discovery-only in this client`);
+  if (["cursor", "opencode"].includes(target.model.harness) && route.plan.permissionProfile !== "inspect") fail(`${target.model.harness === "cursor" ? "Cursor" : "OpenCode"} execution is inspect-only`);
 
   let cwd = process.cwd();
   let worktree = null;
@@ -538,7 +578,9 @@ async function execute(task, route, discovery, cache) {
     ? ["exec", "-C", cwd, "-s", permission === "inspect" ? "read-only" : "workspace-write", "--json", "-m", target.model.nativeModelId, "-"]
     : target.model.harness === "claude"
       ? ["-p", "--model", target.model.nativeModelId, "--output-format", "json", "--permission-mode", permission === "inspect" ? "plan" : "acceptEdits", "--no-session-persistence"]
-      : ["-p", "--output-format", "json", "--mode", "plan", "--model", target.model.nativeModelId, "--workspace", cwd, "--trust"];
+      : target.model.harness === "cursor"
+        ? ["-p", "--output-format", "json", "--mode", "plan", "--model", target.model.nativeModelId, "--workspace", cwd, "--trust"]
+        : ["run", "--model", target.model.nativeModelId, "--agent", "plan", "--format", "json", "--dir", cwd];
   const started = Date.now();
   const result = await run(target.item.executable, argv, { cwd, input: task, timeoutMs: route.plan.maxWallMs });
   const elapsed = Date.now() - started;

@@ -1,6 +1,6 @@
 ---
 name: delegate
-description: Discover locally installed coding-agent CLIs and route bounded software tasks through the hosted TokenSize service while keeping credentials, repository context, prompts, and execution local by default. Use when delegating inspection, planning, implementation, review, or test work to Codex, Claude Code, Cursor Agent, GitHub Copilot CLI, or another configured local harness; comparing available agents; or reducing the primary agent's context usage.
+description: Discover locally installed coding-agent CLIs and route bounded software tasks through the hosted TokenSize service while keeping credentials, repository context, prompts, and execution local by default. Use when delegating inspection, planning, implementation, review, or test work to Codex, Claude Code, Cursor Agent, OpenCode, GitHub Copilot CLI, or another configured local harness; comparing available agents; or reducing the primary agent's context usage.
 ---
 
 # Delegate with TokenSize
@@ -35,7 +35,7 @@ TokenSize receives task features and candidate metadata by default. It does not 
 Subscription-backed harnesses remain ineligible until the user confirms their product terms and opts in locally:
 
 ```sh
-export TOKENSIZE_ALLOW_SUBSCRIPTION_HARNESSES=codex,claude,cursor
+export TOKENSIZE_ALLOW_SUBSCRIPTION_HARNESSES=codex,claude,cursor,opencode
 ```
 
 ## Delegate
@@ -56,7 +56,7 @@ node scripts/tokensize.mjs delegate \
   --role review --permission inspect --execute --json
 ```
 
-Never bypass an unavailable adapter. Network delegation is unsupported. Cursor execution is inspect-only. Edit and test routes require the client-created isolated Git worktree.
+Never bypass an unavailable adapter. Network delegation is unsupported. Cursor and OpenCode execution are inspect-only. OpenCode uses its plan agent and never receives `--auto`. Edit and test routes require the client-created isolated Git worktree.
 
 ## Verify
 
