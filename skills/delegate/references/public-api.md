@@ -4,7 +4,7 @@ The bundled client uses `https://api.tokensize.dev` unless `TOKENSIZE_API_URL` i
 
 ## Authentication
 
-Set `TOKENSIZE_API_KEY` in the process environment. Requests use bearer authentication over HTTPS. Never pass the key as a command-line argument.
+Use `node scripts/tokensize.mjs auth login` for browser-based setup. Headless clients can set `TOKENSIZE_API_KEY` in the process environment. Requests use bearer authentication over HTTPS. Never pass the key as a command-line argument.
 
 ## Stable operations
 

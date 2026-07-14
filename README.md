@@ -30,7 +30,7 @@ Discovery is cached locally for six hours at `~/.tokensize/discovery.json`. Use 
 
 `$delegate feedback` submits optional route feedback. Feedback excludes prompts, repository contents, model output, credentials, and identity.
 
-The skill requires Node.js 20+ and a TokenSize API key supplied through `TOKENSIZE_API_KEY`. It never stores the API key.
+The skill requires Node.js 20+. Browser login stores the API key in `~/.tokensize/credentials.json` with owner-only permissions; headless usage reads `TOKENSIZE_API_KEY` from the process environment. It never stores the key in this repository.
 
 ## Public-code boundary
 

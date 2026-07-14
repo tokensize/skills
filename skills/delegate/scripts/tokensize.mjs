@@ -609,7 +609,7 @@ async function main() {
       savedApiKey().then((key) => key ? api("/v1/agent-catalog") : null),
       discover(),
     ]);
-    emit({ service: { url: API_URL, authenticated: Boolean(process.env.TOKENSIZE_API_KEY), catalog }, privacy: "credentials and prompts remain local unless prompt sharing is explicit", cache: discovered.cache, harnesses: publicDiscovery(discovered.harnesses) });
+    emit({ service: { url: API_URL, authenticated: Boolean(await savedApiKey()), catalog }, privacy: "credentials and prompts remain local unless prompt sharing is explicit", cache: discovered.cache, harnesses: publicDiscovery(discovered.harnesses) });
     return;
   }
   if (command === "feedback") {
