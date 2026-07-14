@@ -578,6 +578,7 @@ async function main() {
   if (command === "auth") {
     if (args[1] !== "login") fail("use: auth login");
     const state = randomUUID();
+    let completed = false;
     const server = createServer((request, response) => {
       if (request.method === "OPTIONS" && request.url === `/callback/${state}`) { response.writeHead(204, { "access-control-allow-origin": "https://tokensize.dev", "access-control-allow-methods": "POST", "access-control-allow-headers": "content-type" }).end(); return; }
       if (request.method !== "POST" || request.url !== `/callback/${state}`) { response.writeHead(404).end(); return; }
@@ -588,6 +589,7 @@ async function main() {
           const payload = JSON.parse(body);
           if (payload.state !== state || typeof payload.apiKey !== "string" || payload.apiKey.length < 20 || /\s/.test(payload.apiKey)) throw new Error("invalid callback");
           await saveApiKey(payload.apiKey);
+          completed = true;
           response.writeHead(200, { "content-type": "text/plain", "access-control-allow-origin": "https://tokensize.dev" }).end("TokenSize connected. You can close this window.\n");
           setTimeout(() => server.close(), 100);
         } catch { response.writeHead(400, { "access-control-allow-origin": "https://tokensize.dev" }).end("Invalid TokenSize callback.\n"); }
@@ -600,7 +602,10 @@ async function main() {
     const url = `https://tokensize.dev/authorize?callback=${encodeURIComponent(callback)}&state=${encodeURIComponent(state)}`;
     process.stdout.write(`Opening TokenSize authorization…\n${url}\n`);
     execFile(process.platform === "darwin" ? "open" : process.platform === "win32" ? "cmd" : "xdg-open", process.platform === "win32" ? ["/c", "start", url] : [url]);
+    const timeout = setTimeout(() => server.close(), 10 * 60 * 1_000);
     await new Promise((resolve) => server.on("close", resolve));
+    clearTimeout(timeout);
+    if (!completed) fail("browser authorization timed out or was cancelled");
     process.stdout.write(`Saved credentials to ${credentialsFile()}\n`);
     return;
   }
