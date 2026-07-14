@@ -621,16 +621,21 @@ async function main() {
     if (!["yes", "no"].includes(wouldUseAgain)) fail("--would-use-again must be yes or no");
     const receipt = await lastRoute();
     const reasonTags = (flag("--tags") || "").split(",").map((value) => value.trim()).filter(Boolean);
-    const response = await api("/v1/pilot-feedback", {
+    const response = await api("/v1/agent-feedback", {
       method: "POST",
       body: JSON.stringify({
+        schemaVersion: 1,
         routeId: receipt.routeId,
         feedbackToken: receipt.feedbackToken,
-        rating,
-        modelChoice,
-        wouldUseAgain: wouldUseAgain === "yes",
-        reasonTags,
-        ...(flag("--comment") ? { comment: flag("--comment") } : {}),
+        idempotencyKey: randomUUID(),
+        status: modelChoice === "wrong" ? "failed" : "verified",
+        confirmedTargetId: receipt.targetId,
+        identityConfirmed: true,
+        checksPassed: modelChoice === "right" ? 1 : 0,
+        checksFailed: modelChoice === "wrong" ? 1 : 0,
+        retries: 0,
+        usage: { contextTokensEstimated: 0, source: "unknown" },
+        timings: { totalMs: 0, routingMs: 0, executionMs: 0, verificationMs: 0 },
       }),
     });
     emit({ ...response, routeId: receipt.routeId, privacy: "feedback excludes prompts, repository contents, model output, and credentials" });
