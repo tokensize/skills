@@ -10,7 +10,7 @@ Use the bundled client to discover local coding harnesses, obtain an advisory ro
 ## Prepare
 
 1. Require Node.js 20 or newer.
-2. Require `TOKENSIZE_API_KEY`. Never print it, place it in arguments, or write it to the repository.
+2. The easiest setup is `node scripts/tokensize.mjs auth login`. It opens TokenSize, asks the signed-in user to approve this terminal, and stores credentials in `~/.tokensize/credentials.json` with owner-only permissions. For headless systems, create a key at `https://tokensize.dev/account` and export `TOKENSIZE_API_KEY` without printing it or putting it in command arguments.
 3. Default to `https://api.tokensize.dev`. Set `TOKENSIZE_API_URL` only for a user-authorized alternative deployment.
 4. Run:
 

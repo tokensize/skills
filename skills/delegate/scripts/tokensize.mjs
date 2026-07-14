@@ -3,7 +3,8 @@ import { randomUUID } from "node:crypto";
 import { access, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { createServer } from "node:http";
 
 const API_URL = (process.env.TOKENSIZE_API_URL || "https://api.tokensize.dev").replace(/\/$/, "");
 const DISCOVERY_CACHE_VERSION = 1;
@@ -39,6 +40,19 @@ function discoveryCacheFile() {
 
 function lastRouteFile() {
   return path.join(tokensizeHome(), "last-route.json");
+}
+
+function credentialsFile() { return path.join(tokensizeHome(), "credentials.json"); }
+async function savedApiKey() {
+  if (process.env.TOKENSIZE_API_KEY) return process.env.TOKENSIZE_API_KEY;
+  try {
+    const value = JSON.parse(await readFile(credentialsFile(), "utf8"));
+    return typeof value.apiKey === "string" ? value.apiKey : undefined;
+  } catch { return undefined; }
+}
+async function saveApiKey(apiKey) {
+  await mkdir(tokensizeHome(), { recursive: true, mode: 0o700 });
+  await writeFile(credentialsFile(), `${JSON.stringify({ apiKey }, null, 2)}\n`, { mode: 0o600 });
 }
 
 function discoveryCacheTtlMs() {
@@ -425,8 +439,8 @@ function features(task, role, permission) {
 }
 
 async function api(pathname, options = {}) {
-  const apiKey = process.env.TOKENSIZE_API_KEY;
-  if (!apiKey) fail("TOKENSIZE_API_KEY is required");
+  const apiKey = await savedApiKey();
+  if (!apiKey) fail("TokenSize API key is missing. Run: node scripts/tokensize.mjs auth login");
   const response = await fetch(`${API_URL}${pathname}`, {
     ...options,
     headers: {
@@ -561,9 +575,38 @@ async function execute(task, route, discovery, cache) {
 }
 
 async function main() {
+  if (command === "auth") {
+    if (args[1] !== "login") fail("use: auth login");
+    const state = randomUUID();
+    const server = createServer((request, response) => {
+      if (request.method === "OPTIONS" && request.url === `/callback/${state}`) { response.writeHead(204, { "access-control-allow-origin": "https://tokensize.dev", "access-control-allow-methods": "POST", "access-control-allow-headers": "content-type" }).end(); return; }
+      if (request.method !== "POST" || request.url !== `/callback/${state}`) { response.writeHead(404).end(); return; }
+      let body = "";
+      request.on("data", (chunk) => { body += chunk; });
+      request.on("end", async () => {
+        try {
+          const payload = JSON.parse(body);
+          if (payload.state !== state || typeof payload.apiKey !== "string" || payload.apiKey.length < 20 || /\s/.test(payload.apiKey)) throw new Error("invalid callback");
+          await saveApiKey(payload.apiKey);
+          response.writeHead(200, { "content-type": "text/plain", "access-control-allow-origin": "https://tokensize.dev" }).end("TokenSize connected. You can close this window.\n");
+          setTimeout(() => server.close(), 100);
+        } catch { response.writeHead(400, { "access-control-allow-origin": "https://tokensize.dev" }).end("Invalid TokenSize callback.\n"); }
+      });
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") fail("could not start local callback");
+    const callback = `http://127.0.0.1:${address.port}/callback/${state}`;
+    const url = `https://tokensize.dev/authorize?callback=${encodeURIComponent(callback)}&state=${encodeURIComponent(state)}`;
+    process.stdout.write(`Opening TokenSize authorization…\n${url}\n`);
+    execFile(process.platform === "darwin" ? "open" : process.platform === "win32" ? "cmd" : "xdg-open", process.platform === "win32" ? ["/c", "start", url] : [url]);
+    await new Promise((resolve) => server.on("close", resolve));
+    process.stdout.write(`Saved credentials to ${credentialsFile()}\n`);
+    return;
+  }
   if (command === "doctor") {
     const [catalog, discovered] = await Promise.all([
-      process.env.TOKENSIZE_API_KEY ? api("/v1/agent-catalog") : Promise.resolve(null),
+      savedApiKey().then((key) => key ? api("/v1/agent-catalog") : null),
       discover(),
     ]);
     emit({ service: { url: API_URL, authenticated: Boolean(process.env.TOKENSIZE_API_KEY), catalog }, privacy: "credentials and prompts remain local unless prompt sharing is explicit", cache: discovered.cache, harnesses: publicDiscovery(discovered.harnesses) });
