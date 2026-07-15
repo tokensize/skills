@@ -9,6 +9,8 @@ import { createServer } from "node:http";
 const API_URL = (process.env.TOKENSIZE_API_URL || "https://api.tokensize.dev").replace(/\/$/, "");
 const DISCOVERY_CACHE_VERSION = 3;
 const DEFAULT_DISCOVERY_CACHE_TTL_MS = 6 * 60 * 60 * 1_000;
+const ALLOWANCE_CACHE_VERSION = 1;
+const DEFAULT_ALLOWANCE_CACHE_TTL_MS = 5 * 60 * 1_000;
 const args = process.argv.slice(2);
 const command = args[0] || "help";
 
@@ -38,6 +40,10 @@ function discoveryCacheFile() {
   return path.join(tokensizeHome(), "discovery.json");
 }
 
+function allowanceCacheFile() {
+  return path.join(tokensizeHome(), "allowance.json");
+}
+
 function lastRouteFile() {
   return path.join(tokensizeHome(), "last-route.json");
 }
@@ -58,6 +64,11 @@ async function saveApiKey(apiKey) {
 function discoveryCacheTtlMs() {
   const configured = Number(process.env.TOKENSIZE_DISCOVERY_CACHE_TTL_MS || DEFAULT_DISCOVERY_CACHE_TTL_MS);
   return Number.isFinite(configured) && configured >= 0 ? configured : DEFAULT_DISCOVERY_CACHE_TTL_MS;
+}
+
+function allowanceCacheTtlMs() {
+  const configured = Number(process.env.TOKENSIZE_ALLOWANCE_CACHE_TTL_MS || DEFAULT_ALLOWANCE_CACHE_TTL_MS);
+  return Number.isFinite(configured) && configured >= 0 ? configured : DEFAULT_ALLOWANCE_CACHE_TTL_MS;
 }
 
 function discoveryFingerprint() {
@@ -101,7 +112,8 @@ async function run(executable, argv, options = {}) {
 }
 
 async function findExecutable(names) {
-  for (const directory of (process.env.PATH || "").split(path.delimiter)) {
+  const directories = [...new Set([process.env.NVM_BIN, process.env.VOLTA_HOME ? path.join(process.env.VOLTA_HOME, "bin") : undefined, path.dirname(process.execPath), ...(process.env.PATH || "").split(path.delimiter), path.join(os.homedir(), ".local", "bin"), path.join(os.homedir(), ".opencode", "bin")].filter(Boolean))];
+  for (const directory of directories) {
     for (const name of names) {
       const candidate = path.join(directory, name);
       try {
@@ -161,7 +173,7 @@ async function discoverCodex() {
       child.kill();
       resolve(value);
     };
-    const timer = setTimeout(() => finish([]), 8_000);
+    const timer = setTimeout(() => finish([]), 20_000);
     child.stdout.on("data", (chunk) => {
       buffer += chunk.toString();
       let newline;
@@ -184,7 +196,7 @@ async function discoverCodex() {
         } catch {}
       }
     });
-    child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { clientInfo: { name: "tokensize-public-skill", version: "1.0.0" }, capabilities: { experimentalApi: true } } })}\n`);
+    child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { clientInfo: { name: "tokensize", version: "0.1.0" }, capabilities: { experimentalApi: true } } })}\n`);
   });
   return {
     harness: "codex",
@@ -200,11 +212,12 @@ async function discoverCodex() {
 async function discoverClaude() {
   const executable = await findExecutable(["claude"]);
   if (!executable) return { harness: "claude", installed: false, authenticated: false, models: [], warnings: [] };
-  const [version, auth, help] = await Promise.all([
+  const [version, initialAuth, help] = await Promise.all([
     run(executable, ["--version"]),
-    run(executable, ["auth", "status"]),
+    run(executable, ["auth", "status"], { timeoutMs: 30_000 }),
     run(executable, ["--help"]),
   ]);
+  const auth = initialAuth.code === 0 ? initialAuth : await run(executable, ["auth", "status"], { timeoutMs: 30_000 });
   const configured = (process.env.TOKENSIZE_CLAUDE_MODELS || "").split(",").map((value) => value.trim()).filter(Boolean);
   const reported = [...new Set([
     ...(help.stdout.match(/'([a-z][a-z0-9.-]+)'/g) || []).map((value) => value.slice(1, -1)),
@@ -419,6 +432,187 @@ async function discover(options = {}) {
   return { harnesses, cache };
 }
 
+function allowance(status, source, remainingFraction, resetsAt) {
+	const normalized = remainingFraction === undefined
+		? undefined
+		: Math.round(Math.max(0, Math.min(1, remainingFraction)) * 10_000) / 10_000;
+  return {
+    status,
+    source,
+    observedAt: new Date().toISOString(),
+    ...(normalized === undefined ? {} : { remainingFraction: normalized }),
+    ...(resetsAt ? { resetsAt } : {}),
+  };
+}
+
+function unavailableAllowance() {
+  return allowance("unknown", "unavailable");
+}
+
+function allowanceStatus(remaining) {
+  if (remaining <= 0) return "exhausted";
+  if (remaining <= 0.15) return "low";
+  return "available";
+}
+
+async function codexAllowance(executable) {
+  return await new Promise((resolve) => {
+    const child = spawn(executable, ["app-server", "--stdio"], { shell: false, stdio: ["pipe", "pipe", "ignore"] });
+    let buffer = "";
+    let finished = false;
+    const finish = (value) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      child.kill();
+      resolve(value);
+    };
+    const timer = setTimeout(() => finish(unavailableAllowance()), 15_000);
+    child.once("error", () => finish(unavailableAllowance()));
+    child.stdout.on("data", (chunk) => {
+      buffer += chunk.toString();
+      let newline;
+      while ((newline = buffer.indexOf("\n")) >= 0) {
+        const line = buffer.slice(0, newline);
+        buffer = buffer.slice(newline + 1);
+        try {
+          const message = JSON.parse(line);
+          if (message.id === 1) {
+            child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`);
+            child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "account/rateLimits/read" })}\n`);
+          }
+          if (message.id === 2) {
+            const limits = message.result?.rateLimits;
+            if (!limits) return finish(unavailableAllowance());
+            if (limits.rateLimitReachedType) return finish(allowance("exhausted", "runtime-reported", 0));
+            const windows = [limits.primary, limits.secondary].filter(Boolean).flatMap((value) =>
+              typeof value.usedPercent === "number" ? [{ remaining: 1 - value.usedPercent / 100, resetsAt: value.resetsAt }] : []);
+            if (typeof limits.individualLimit?.remainingPercent === "number") windows.push({ remaining: limits.individualLimit.remainingPercent / 100, resetsAt: limits.individualLimit.resetsAt });
+            if (!windows.length && limits.credits?.unlimited) return finish(allowance("unmetered", "runtime-reported"));
+            if (!windows.length) return finish(unavailableAllowance());
+            const constrained = windows.sort((a, b) => a.remaining - b.remaining)[0];
+            const remaining = Math.max(0, Math.min(1, constrained.remaining));
+            const resetsAt = constrained.resetsAt ? new Date(constrained.resetsAt * 1_000).toISOString() : undefined;
+            return finish(allowance(allowanceStatus(remaining), "runtime-reported", remaining, resetsAt));
+          }
+        } catch {}
+      }
+    });
+    child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { clientInfo: { name: "tokensize", version: "0.1.0" }, capabilities: { experimentalApi: true } } })}\n`);
+  });
+}
+
+function stripTerminal(value) {
+  return value
+    .replace(/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, "")
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "")
+    .replace(/\r/g, "\n");
+}
+
+function parseClaudeUsage(raw) {
+  const text = stripTerminal(raw);
+  const usageScreen = text.slice(Math.max(0, text.lastIndexOf("Settings")));
+  const ordered = [...usageScreen.matchAll(/(\d{1,3})\s*%\s*used/gi)].map((match) => Math.max(0, Math.min(100, Number(match[1]))));
+  const generalUsed = ordered.slice(0, 2);
+  const fableUsed = ordered[2];
+  const generalRemaining = generalUsed.length ? 1 - Math.max(...generalUsed) / 100 : undefined;
+  const defaultAllowance = generalRemaining === undefined
+    ? unavailableAllowance()
+    : allowance(allowanceStatus(generalRemaining), "runtime-reported", generalRemaining);
+  const byModelId = {};
+  if (fableUsed !== undefined) {
+    const remaining = Math.min(generalRemaining ?? 1, 1 - fableUsed / 100);
+    byModelId.fable = allowance(allowanceStatus(remaining), "runtime-reported", remaining);
+  }
+  return { default: defaultAllowance, ...(Object.keys(byModelId).length ? { byModelId } : {}) };
+}
+
+async function claudeAllowance(executable) {
+  if (process.platform !== "darwin") return { default: unavailableAllowance() };
+  try { await access("/usr/bin/expect"); } catch { return { default: unavailableAllowance() }; }
+  return await new Promise((resolve) => {
+    const script = "set timeout 10; log_user 1; spawn -noecho $env(TOKENSIZE_CLAUDE_EXECUTABLE) --safe-mode; after 1800; send -- \"/usage\\r\"; after 700; send -- \"\\r\"; expect -re {Current}; after 3500; exit 0";
+    const child = spawn("/usr/bin/expect", ["-c", script], { env: { ...process.env, TERM: "xterm-256color", TOKENSIZE_CLAUDE_EXECUTABLE: executable }, stdio: ["pipe", "pipe", "pipe"] });
+    let raw = "";
+    let finished = false;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      try { child.kill("SIGTERM"); } catch {}
+      const parsed = parseClaudeUsage(raw);
+      raw = "";
+      resolve(parsed);
+    };
+    const collect = (chunk) => { if (raw.length < 256_000) raw += chunk.toString().slice(0, 256_000 - raw.length); };
+    const timer = setTimeout(finish, 13_000);
+    child.stdout.on("data", collect);
+    child.stderr.on("data", collect);
+    child.once("error", finish);
+    child.once("close", finish);
+  });
+}
+
+async function collectAllowances(harnesses) {
+  const snapshots = {};
+  for (const item of harnesses) {
+    if (!item.installed || !item.executable) continue;
+    if (!item.authenticated && item.harness !== "claude") continue;
+    if (!item.authenticated && item.harness === "claude" && (await run(item.executable, ["auth", "status"], { timeoutMs: 30_000 })).code !== 0) continue;
+    if (item.harness === "codex") {
+      let detected = await codexAllowance(item.executable);
+      if (detected.status === "unknown") detected = await codexAllowance(item.executable);
+      snapshots.codex = { default: detected };
+    } else if (item.harness === "claude") {
+      let detected = await claudeAllowance(item.executable);
+      if (detected.default.status === "unknown") detected = await claudeAllowance(item.executable);
+      snapshots.claude = detected;
+    }
+    else snapshots[item.harness] = { default: unavailableAllowance() };
+  }
+  return snapshots;
+}
+
+async function readAllowanceCache() {
+  try {
+    const cached = JSON.parse(await readFile(allowanceCacheFile(), "utf8"));
+    if (cached.schemaVersion !== ALLOWANCE_CACHE_VERSION || !cached.createdAt || !cached.expiresAt || !cached.harnesses || Date.parse(cached.expiresAt) <= Date.now()) return null;
+    return { harnesses: cached.harnesses, cache: { hit: true, path: allowanceCacheFile(), createdAt: cached.createdAt, expiresAt: cached.expiresAt } };
+  } catch { return null; }
+}
+
+async function allowances(harnesses, options = {}) {
+  if (!options.forceRefresh && !has("--refresh")) {
+    const cached = await readAllowanceCache();
+    if (cached) return cached;
+  }
+  const snapshots = await collectAllowances(harnesses);
+  const createdAt = new Date();
+  const value = { schemaVersion: ALLOWANCE_CACHE_VERSION, createdAt: createdAt.toISOString(), expiresAt: new Date(createdAt.getTime() + allowanceCacheTtlMs()).toISOString(), harnesses: snapshots };
+  const file = allowanceCacheFile();
+  const temporary = `${file}.${process.pid}.tmp`;
+  await mkdir(tokensizeHome(), { recursive: true, mode: 0o700 });
+  await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+  await rename(temporary, file);
+  return { harnesses: snapshots, cache: { hit: false, path: file, createdAt: value.createdAt, expiresAt: value.expiresAt } };
+}
+
+function modelAllowance(model, snapshots) {
+  if (model.harness === "opencode" && isCredentialFreeOpenCodeModel(model.nativeModelId)) return allowance("unmetered", "credential-free");
+  const harness = snapshots[model.harness];
+  if (!harness) return unavailableAllowance();
+  if (model.harness === "claude" && /fable/i.test(model.nativeModelId)) return harness.byModelId?.fable || unavailableAllowance();
+  return harness.default;
+}
+
+function applyAllowances(harnesses, snapshot) {
+  return harnesses.map((item) => ({ ...item, models: item.models.map((model) => ({ ...model, allowance: modelAllowance(model, snapshot.harnesses) })) }));
+}
+
+function rootAllowance(harness, snapshot) {
+  return snapshot.harnesses[harness]?.default || unavailableAllowance();
+}
+
 async function installationId() {
   const home = tokensizeHome();
   const file = path.join(home, "config.json");
@@ -510,7 +704,8 @@ async function prepare(task) {
   if (!["inspect", "plan", "implement", "review", "test"].includes(role)) fail("invalid --role");
   if (!["inspect", "edit", "test", "network"].includes(permission)) fail("invalid --permission");
   const discovered = await discover();
-  const discovery = discovered.harnesses;
+  const allowanceSnapshot = await allowances(discovered.harnesses);
+  const discovery = applyAllowances(discovered.harnesses, allowanceSnapshot);
   const queues = discovery.filter((item) => item.authenticated).map((item) => [...item.models]);
   const candidates = [];
   while (candidates.length < 100 && queues.some((queue) => queue.length)) {
@@ -531,6 +726,7 @@ async function prepare(task) {
     root: {
       harness: process.env.TOKENSIZE_ROOT_HARNESS || "codex",
       qualityPrior: Number(process.env.TOKENSIZE_ROOT_QUALITY_PRIOR || 0.82),
+      allowance: rootAllowance(process.env.TOKENSIZE_ROOT_HARNESS || "codex", allowanceSnapshot),
     },
     policy: {
       objective: flag("--objective") || "balanced",
@@ -540,11 +736,55 @@ async function prepare(task) {
       wallTimeBudgetMs: Number(flag("--timeout-ms") || 900_000),
     },
   };
-  return { body, discovery, cache: discovered.cache };
+  return { body, discovery, cache: { discovery: discovered.cache, allowance: allowanceSnapshot.cache } };
 }
 
 function publicRoute(route) {
   return { ...route, feedbackToken: "[redacted]" };
+}
+
+function publicAllowance(value) {
+  const remainingFraction = value.remainingFraction === undefined
+    ? undefined
+    : Math.round(value.remainingFraction * 10_000) / 10_000;
+  return {
+    ...value,
+    ...(remainingFraction === undefined ? {} : {
+      remainingFraction,
+      remainingPercent: Math.round(remainingFraction * 1_000) / 10,
+    }),
+  };
+}
+
+function allowanceKey(value) {
+  return [value.status, value.source, value.remainingFraction ?? "n/a", value.resetsAt ?? "n/a"].join(":");
+}
+
+function modelAllowanceScopes(item) {
+  const scopes = new Map();
+  for (const model of item.models) {
+    const value = model.allowance || unavailableAllowance();
+    const key = allowanceKey(value);
+    const existing = scopes.get(key);
+    if (existing) existing.modelIds.push(model.nativeModelId);
+    else scopes.set(key, { modelIds: [model.nativeModelId], allowance: value });
+  }
+  return [...scopes.values()].map((scope) => {
+    const compact = scope.modelIds.length > 12;
+    return {
+      ...(compact ? { sampleModelIds: scope.modelIds.slice(0, 12), omittedModelCount: scope.modelIds.length - 12 } : { modelIds: scope.modelIds }),
+      modelCount: scope.modelIds.length,
+      allowance: publicAllowance(scope.allowance),
+    };
+  });
+}
+
+function allowanceReport(harnesses, snapshot) {
+  return harnesses.filter((item) => item.installed).map((item) => ({
+    harness: item.harness,
+    harnessDefault: publicAllowance(snapshot.harnesses[item.harness]?.default || unavailableAllowance()),
+    modelScopes: modelAllowanceScopes(item),
+  }));
 }
 
 function publicDiscovery(harnesses) {
@@ -555,6 +795,7 @@ function publicDiscovery(harnesses) {
     authenticated: item.authenticated,
     version: item.version,
     modelCount: item.models.length,
+    allowanceScopes: modelAllowanceScopes(item),
     warnings: item.warnings,
   }));
 }
@@ -602,10 +843,15 @@ async function execute(task, route, discovery, cache) {
   const elapsed = Date.now() - started;
   const availabilityFailure = result.timedOut || (result.code !== 0
     && /unknown model|model.{0,24}(not found|not available|unavailable|invalid)|invalid value.{0,80}--model|not logged in|unauthenticated|authentication|command not found|enoent/i.test(`${result.stderr}\n${result.stdout}`));
+  const allowanceFailure = result.code !== 0 && /rate.?limit|usage.?limit|quota|allowance|credit(?:s)? exhausted|insufficient credit/i.test(`${result.stderr}\n${result.stdout}`);
   let discoveryRefresh;
   if (availabilityFailure) {
     const refreshed = await discover({ forceRefresh: true, reason: result.timedOut ? "execution-timeout" : "execution-availability-failure" });
     discoveryRefresh = refreshed.cache;
+  }
+  let allowanceRefresh;
+  if (allowanceFailure) {
+    allowanceRefresh = (await allowances(discovery, { forceRefresh: true })).cache;
   }
   try {
     await api("/v1/agent-feedback", {
@@ -629,7 +875,7 @@ async function execute(task, route, discovery, cache) {
   } catch (error) {
     result.feedbackWarning = error instanceof Error ? error.message : String(error);
   }
-  return { target: target.model.id, code: result.code, timedOut: result.timedOut, worktree, stdout: result.stdout, stderr: result.stderr, feedbackWarning: result.feedbackWarning, cacheUsed: cache, discoveryRefresh };
+  return { target: target.model.id, code: result.code, timedOut: result.timedOut, worktree, stdout: result.stdout, stderr: result.stderr, feedbackWarning: result.feedbackWarning, cacheUsed: cache, discoveryRefresh, allowanceRefresh };
 }
 
 async function main() {
@@ -667,12 +913,18 @@ async function main() {
     process.stdout.write(`Saved credentials to ${credentialsFile()}\n`);
     return;
   }
-  if (command === "doctor") {
+  if (command === "doctor" || command === "allowance") {
     const [catalog, discovered] = await Promise.all([
       savedApiKey().then((key) => key ? api("/v1/agent-catalog") : null),
       discover(),
     ]);
-    emit({ service: { url: API_URL, authenticated: Boolean(await savedApiKey()), catalog }, privacy: "credentials and prompts remain local unless prompt sharing is explicit", cache: discovered.cache, harnesses: publicDiscovery(discovered.harnesses) });
+    const allowanceSnapshot = await allowances(discovered.harnesses);
+    if (command === "allowance") {
+      const available = applyAllowances(discovered.harnesses, allowanceSnapshot);
+      emit({ format: "json", privacy: "only normalized allowance metadata is cached locally; raw account output is discarded", cache: allowanceSnapshot.cache, harnesses: allowanceReport(available, allowanceSnapshot) });
+      return;
+    }
+    emit({ service: { url: API_URL, authenticated: Boolean(await savedApiKey()), catalog }, privacy: "credentials, raw account output, and prompts remain local unless prompt sharing is explicit", cache: { discovery: discovered.cache, allowance: allowanceSnapshot.cache }, harnesses: publicDiscovery(applyAllowances(discovered.harnesses, allowanceSnapshot)) });
     return;
   }
   if (command === "feedback") {
@@ -719,7 +971,7 @@ async function main() {
     if (execution.code !== 0) process.exitCode = 1;
     return;
   }
-  process.stdout.write(`TokenSize Delegate\n\n  doctor [--refresh] [--verbose] [--json]\n  route --task TEXT [--role inspect|plan|implement|review|test] [--permission inspect|edit|test] [--refresh] [--verbose]\n  delegate --task TEXT [same options] [--execute]\n  feedback --rating 1..5 --model-choice right|acceptable|wrong --would-use-again yes|no [--tags TAGS] [--comment TEXT]\n`);
+  process.stdout.write(`TokenSize Delegate\n\n  doctor [--refresh] [--verbose] [--json]\n  allowance [--refresh] [--json]\n  route --task TEXT [--role inspect|plan|implement|review|test] [--permission inspect|edit|test] [--refresh] [--verbose]\n  delegate --task TEXT [same options] [--execute]\n  feedback --rating 1..5 --model-choice right|acceptable|wrong --would-use-again yes|no [--tags TAGS] [--comment TEXT]\n`);
 }
 
 main().catch((error) => fail(error instanceof Error ? error.message : String(error)));

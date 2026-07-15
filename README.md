@@ -30,6 +30,8 @@ This opens TokenSize, asks the signed-in user to approve the terminal, and store
 
 Discovery is cached locally for six hours at `~/.tokensize/discovery.json`. Use `--refresh` to rescan immediately; missing or unavailable cached targets cause an automatic refresh. Normal output is summarized to conserve agent context, with `--verbose` available for the complete model catalog. The cache never stores credentials or prompts.
 
+Allowance data is refreshed separately every five minutes and stored owner-only at `~/.tokensize/allowance.json`. Run `node scripts/tokensize.mjs allowance --refresh --json` to inspect labeled harness defaults and model-specific scopes with readable percentages. TokenSize uses allowance only among quality-equivalent candidates, so a larger balance never causes a weaker model to be selected. Codex and macOS Claude Code currently expose live remaining allowance; unsupported interfaces remain `unknown`, and credential-free OpenCode models are treated as unmetered. Raw account output and identity never leave the machine. Client commands emit JSON by default; `--json` remains accepted for compatibility.
+
 `$delegate feedback` submits optional route feedback. Feedback excludes prompts, repository contents, model output, credentials, and identity.
 
 The skill requires Node.js 20+. Browser login stores the API key in `~/.tokensize/credentials.json` with owner-only permissions; headless usage reads `TOKENSIZE_API_KEY` from the process environment. It never stores the key in this repository.

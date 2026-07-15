@@ -20,6 +20,16 @@ node scripts/tokensize.mjs doctor --json
 
 Discovery is cached for six hours in `~/.tokensize/discovery.json`. Set `TOKENSIZE_DISCOVERY_CACHE_TTL_MS` to change the TTL, or add `--refresh` to force discovery. Normal output is summarized to conserve context; use `--verbose` only when full model metadata is needed. The cache contains harness/model capability metadata only—never credentials or prompts. Missing executables, stale selected targets, and model/authentication availability failures trigger a refresh. Treat discovery as capability metadata, not proof that a paid model invocation will succeed.
 
+The client also asks supported harnesses for their current allowance without invoking a model. Inspect it with:
+
+```sh
+node scripts/tokensize.mjs allowance --refresh --json
+```
+
+Normalized remaining fractions are cached for five minutes in `~/.tokensize/allowance.json` with owner-only permissions. Raw account screens and identity data are discarded and never sent to TokenSize. Codex is read through its local app-server; Claude Code is read through its own `/usage` screen on macOS; credential-free OpenCode models are marked unmetered. Harnesses that do not safely expose remaining allowance stay `unknown`, which is never treated as exhausted. A rate-limit execution failure refreshes this cache.
+
+The allowance report labels the harness-wide default separately from model-specific scopes and includes both a normalized fraction and readable percentage. For example, Claude's general limit and a Fable-family limit remain distinguishable, while OpenCode can have an unknown harness default and explicitly unmetered credential-free model scopes. Large identical scopes show a representative model-ID sample plus an omitted count to conserve context; use `doctor --verbose` for the full catalog. Client commands emit JSON by default to keep agent parsing deterministic; `--json` is accepted for compatibility and emphasis.
+
 ## Route safely
 
 Turn the request into one bounded task with explicit scope, acceptance criteria, and forbidden actions. Keep the permission at `inspect` unless the user requested mutation.
@@ -31,6 +41,8 @@ node scripts/tokensize.mjs route \
 ```
 
 TokenSize receives task features and candidate metadata by default. It does not receive the task text. Use `--share-prompt` only after the user approves sending that prompt to TokenSize.
+
+Allowance cannot make a weaker model eligible. The router first enforces permissions and product approval, excludes exhausted targets, and keeps only quality-equivalent top candidates. It then prefers unmetered, known-available, unknown, and known-low allowances in that order; the requested cost/latency objective breaks ties. A constrained root may delegate a small task only to a quality-equivalent or better target.
 
 Subscription-backed harnesses remain ineligible until the user confirms their product terms and opts in locally:
 
@@ -68,7 +80,7 @@ Report the selected harness/model, routing reason and confidence, granted permis
 
 ## Send pilot feedback
 
-After the user evaluates the selected model, send optional feedback from the locally stored last-route receipt:
+After the user evaluates the selected route choice, send optional feedback from the locally stored last-route receipt. A dry route stores an evaluated-route receipt even though it does not execute a model, allowing feedback about routing quality itself:
 
 ```sh
 node scripts/tokensize.mjs feedback \
