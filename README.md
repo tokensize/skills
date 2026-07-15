@@ -18,6 +18,8 @@ $delegate inspect this repository for authentication risks
 
 The [`delegate`](skills/delegate/SKILL.md) skill discovers local Codex, Claude Code, Cursor Agent, OpenCode, and GitHub Copilot CLI installations; requests a privacy-safe route from `api.tokensize.dev`; and optionally executes the approved route locally. OpenCode execution is inspect-only and uses its plan agent without broad `--auto` approval.
 
+OpenCode's built-in `opencode/*-free` models and `opencode/big-pickle` work without stored provider credentials and are eligible automatically. Paid or provider-backed OpenCode models still require local authentication and explicit `TOKENSIZE_ALLOW_SUBSCRIPTION_HARNESSES=opencode` approval.
+
 The easiest setup is the browser callback flow:
 
 ```sh

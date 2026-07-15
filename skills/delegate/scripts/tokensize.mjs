@@ -7,7 +7,7 @@ import { execFile, spawn } from "node:child_process";
 import { createServer } from "node:http";
 
 const API_URL = (process.env.TOKENSIZE_API_URL || "https://api.tokensize.dev").replace(/\/$/, "");
-const DISCOVERY_CACHE_VERSION = 2;
+const DISCOVERY_CACHE_VERSION = 3;
 const DEFAULT_DISCOVERY_CACHE_TTL_MS = 6 * 60 * 60 * 1_000;
 const args = process.argv.slice(2);
 const command = args[0] || "help";
@@ -279,6 +279,10 @@ function opencodeModelIds(output) {
     .filter((line) => /^[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._:/-]*$/i.test(line)))];
 }
 
+function isCredentialFreeOpenCodeModel(id) {
+  return /^opencode\/(?:big-pickle|[a-z0-9._:/-]+-free)$/i.test(id);
+}
+
 async function discoverOpenCode() {
   const executable = await findExecutable(["opencode"]);
   if (!executable) return { harness: "opencode", installed: false, authenticated: false, models: [], warnings: [] };
@@ -288,16 +292,25 @@ async function discoverOpenCode() {
     run(executable, ["models"], { timeoutMs: 30_000, maxBytes: 2_000_000 }),
   ]);
   const authOutput = stripAnsi(`${auth.stdout}\n${auth.stderr}`).trim();
-  const authenticated = auth.code === 0 && authOutput.length > 0 && !/\b(?:no|0)\s+(?:credentials|providers|authentication)\b/i.test(authOutput);
+  const hasStoredCredentials = auth.code === 0 && authOutput.length > 0 && !/\b(?:no|0)\s+(?:credentials|providers|authentication)\b/i.test(authOutput);
   const available = opencodeModelIds(catalog.stdout);
+  const credentialFree = available.filter(isCredentialFreeOpenCodeModel);
+  const authenticated = hasStoredCredentials || credentialFree.length > 0;
   const frontier = available.filter((id) => /gpt-5\.[4-9]|opus|fable|sonnet|grok|gemini|glm|qwen|coder/i.test(id));
-  const models = (frontier.length ? frontier : available).slice(0, 48).map((id) => candidate("opencode", id, id, {
-    permissions: ["inspect"],
-  }));
+  const ids = [...new Set([...credentialFree, ...(frontier.length ? frontier : available)])].slice(0, 48);
+  const models = ids.map((id) => {
+    const credentialFreeModel = isCredentialFreeOpenCodeModel(id);
+    return candidate("opencode", id, id, {
+      permissions: ["inspect"],
+      approved: credentialFreeModel || approved("opencode"),
+      authMode: credentialFreeModel ? "cloud-provider" : "subscription",
+    });
+  });
   const warnings = [];
-  if (!authenticated) warnings.push("OpenCode did not report a configured provider credential");
+  if (!hasStoredCredentials && credentialFree.length) warnings.push(`OpenCode has no stored provider credentials; ${credentialFree.length} credential-free model(s) remain available`);
+  else if (!hasStoredCredentials) warnings.push("OpenCode did not report a configured provider credential");
   if (!models.length) warnings.push("OpenCode model catalog was unavailable; run `opencode models --refresh`");
-  if (!approved("opencode")) warnings.push("Set TOKENSIZE_ALLOW_SUBSCRIPTION_HARNESSES=opencode only when provider and product terms permit delegated use");
+  if (!approved("opencode") && models.some((model) => model.authMode === "subscription")) warnings.push("Paid/provider OpenCode models remain ineligible; set TOKENSIZE_ALLOW_SUBSCRIPTION_HARNESSES=opencode only when provider and product terms permit delegated use");
   return { harness: "opencode", installed: true, authenticated, executable, version: version.stdout.trim(), models, warnings };
 }
 
@@ -313,8 +326,8 @@ function applyCurrentApproval(harnesses) {
         || (model.harness === "claude" && Boolean(process.env.ANTHROPIC_API_KEY));
       return {
         ...model,
-        authMode: apiKeyMode ? "api-key" : "subscription",
-        productUseApproved: apiKeyMode || approved(model.harness),
+        authMode: model.harness === "opencode" && isCredentialFreeOpenCodeModel(model.nativeModelId) ? "cloud-provider" : apiKeyMode ? "api-key" : "subscription",
+        productUseApproved: (model.harness === "opencode" && isCredentialFreeOpenCodeModel(model.nativeModelId)) || apiKeyMode || approved(model.harness),
       };
     }),
   }));

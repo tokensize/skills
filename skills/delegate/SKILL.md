@@ -38,6 +38,8 @@ Subscription-backed harnesses remain ineligible until the user confirms their pr
 export TOKENSIZE_ALLOW_SUBSCRIPTION_HARNESSES=codex,claude,cursor,opencode
 ```
 
+Credential-free OpenCode models under `opencode/*-free`, plus `opencode/big-pickle`, are discovered and approved without that subscription opt-in. Paid/provider models remain fail-closed.
+
 ## Delegate
 
 Preview first:
