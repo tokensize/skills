@@ -286,14 +286,17 @@ function isCredentialFreeOpenCodeModel(id) {
 async function discoverOpenCode() {
   const executable = await findExecutable(["opencode"]);
   if (!executable) return { harness: "opencode", installed: false, authenticated: false, models: [], warnings: [] };
-  const [version, auth, catalog] = await Promise.all([
+  const [version, auth, initialCatalog] = await Promise.all([
     run(executable, ["--version"]),
     run(executable, ["auth", "list"]),
     run(executable, ["models"], { timeoutMs: 30_000, maxBytes: 2_000_000 }),
   ]);
   const authOutput = stripAnsi(`${auth.stdout}\n${auth.stderr}`).trim();
   const hasStoredCredentials = auth.code === 0 && authOutput.length > 0 && !/\b(?:no|0)\s+(?:credentials|providers|authentication)\b/i.test(authOutput);
-  const available = opencodeModelIds(catalog.stdout);
+  let available = opencodeModelIds(initialCatalog.stdout);
+  if (available.length === 0) {
+    available = opencodeModelIds((await run(executable, ["models"], { timeoutMs: 30_000, maxBytes: 2_000_000 })).stdout);
+  }
   const credentialFree = available.filter(isCredentialFreeOpenCodeModel);
   const authenticated = hasStoredCredentials || credentialFree.length > 0;
   const frontier = available.filter((id) => /gpt-5\.[4-9]|opus|fable|sonnet|grok|gemini|glm|qwen|coder/i.test(id));
